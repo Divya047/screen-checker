@@ -1,0 +1,149 @@
+# ScreenChecker
+
+A macOS menu-bar watchdog that watches the **frontmost window** during your
+monitoring slots and **closes tabs it judges distracting** — while explicitly
+exempting learning content (tutorials, lectures, docs, coding videos —
+including on YouTube).
+
+Built as a Swift package + app bundle (macOS 14+), with a hybrid classifier:
+instant local rules first, and a vision LLM (via the local `opencode` CLI and
+`mimo-v2.6-pro`) only for ambiguous screens.
+
+## What it does
+
+Every sample tick (default 30s), while the screen is unlocked and the current
+time is inside a monitoring slot (default **12:00–13:00** weekdays, editable):
+
+1. **Sample** — frontmost app, focused window title, active browser tab URL,
+   and a screenshot of just that window.
+2. **Classify (tier 0 — instant, offline)**
+   - learning allowlists / learning title keywords → *productive*
+   - protected title keywords (meeting, invoice, bank…) → *productive, never enforced*
+   - known distraction patterns (`youtube.com/shorts`, tiktok, reels, reddit,
+     netflix, twitch, x.com…) → *distraction*
+   - known productive apps/URLs (IDEs, terminal, GitHub, docs…) → *productive*
+   - media/game apps (VLC, IINA, Steam…) → *distraction*
+   - unknown browser content → **tier 1**
+   - unknown non-browser apps → *productive* (fail-open)
+3. **Classify (tier 1 — vision LLM, ambiguous cases only)** — the screenshot
+   plus app/title/URL metadata goes to `opencode run --agent screen-classifier
+   -m opencode-go/mimo-v2.6-pro`, which returns strict JSON
+   `{"is_distraction", "confidence", "category", "reason"}`. The agent has
+   **zero tools and deny-all permissions**, so an unattended background
+   invocation can only look and answer. Any error/timeout/unparseable reply
+   → *productive* (fail-open) with the error logged.
+4. **Enforce** — distraction verdicts:
+   - browsers → **close the active tab** (AppleScript)
+   - other apps → **hide** (never force-quit)
+   - guarded by: mode must be `enforce`, LLM confidence ≥ threshold,
+     a global action cooldown (default 120s), and no active learning break.
+   - you get a notification with **“This was productive”**, which adds the
+     URL/channel to the learning allowlist for the future.
+5. **Log** — daily JSONL events + screenshot evidence (auto-pruned),
+   viewable as “Today’s report”.
+
+Monitoring pauses while the screen is locked/asleep, outside slots, or during
+a **learning break** (menu → “Start 30-min learning break”).
+
+## Quick start
+
+```bash
+./scripts/setup.sh          # checks opencode, builds, launches
+```
+
+or manually:
+
+```bash
+./app/build-app.sh          # -> build/ScreenChecker.app
+open build/ScreenChecker.app
+```
+
+**First run:** the onboarding window walks you through the one-time
+permissions:
+
+| Permission | Why |
+|---|---|
+| **Screen Recording** | window titles + frontmost-window screenshots |
+| **Notifications** | distraction alerts + “This was productive” action |
+| **Automation** (per browser) | reading/closing the active tab — a prompt appears the first time each browser is touched |
+
+> After granting Screen Recording, restart the app (macOS rule).
+
+It **starts in warn-only mode** — nothing gets closed until you flip
+menu → *Mode: Enforce (close tabs)*. Check **Today’s report** first.
+
+## Configuration
+
+Everything lives in
+`~/Library/Application Support/ScreenChecker/config.json`
+(editable directly or via Settings…):
+
+```jsonc
+{
+  "mode": "warnOnly",                  // warnOnly | enforce
+  "slots": [ { "start": "12:00", "end": "13:00", "label": "Lunch danger zone" } ],
+  "skipWeekends": true,
+  "sampleInterval": 30,
+  "confidenceThreshold": 0.8,          // minimum LLM confidence to enforce
+  "enforcementCooldown": 120,          // seconds between actions
+  "verdictCacheTTL": 600,             // same app+URL -> reuse verdict
+  "learningBreakMinutes": 30,
+  "llmForAmbiguous": true,
+  "keepScreenshots": true,
+  "screenshotRetentionDays": 7,
+  "opencodeModel": "opencode-go/mimo-v2.6-pro",
+  "opencodeTimeout": 45,
+  "learningChannelPatterns": [ "youtube.com/@freecodecamp", ... ],
+  "learningTitleKeywords": [ "tutorial", "lecture", ... ],
+  "distractionURLPatterns": [ "youtube.com/shorts", "tiktok.com", ... ],
+  "productiveApps": [ "com.apple.dt.Xcode", ... ],
+  "protectedTitleKeywords": [ "meeting", "invoice", ... ]
+}
+```
+
+- Learning rules **always win** over distraction patterns.
+- Tapping **“This was productive”** on a notification appends to
+  `learningURLPatterns` (YouTube watch URLs pin to the specific video).
+- Files: `events/*.jsonl` (90-day log), `evidence/*.png` (retention days),
+  `.opencode/agents/screen-classifier.md` (auto-installed classifier agent).
+
+## Privacy & safety design
+
+- Screenshots never leave the machine **except** when tier 1 runs — then one
+  frontmost-window PNG goes to *your* opencode model
+  (`opencode-go/mimo-v2.6-pro` on your configured provider).
+- The tier-1 agent is deny-all/zero-tool/`steps: 1` (see
+  `config/screen-classifier.md`) — it can’t touch your filesystem.
+- Fail-open everywhere: unknown apps, LLM errors, timeouts, and
+  low-confidence verdicts are never enforced.
+- Enforcement cooldown + protected keywords stop a bad day by the model from
+  closing a stack of real work windows.
+- Menu → *Start learning break* suspends sampling entirely for N minutes.
+
+## Development
+
+```bash
+swift build && swift test    # 34 unit tests (slots, rules, LLM output parsing)
+./app/build-app.sh           # release bundle + ad-hoc codesign
+```
+
+Layout:
+
+```
+Sources/ScreenCheckerCore/   # engine, sampler, classifiers, enforcer, stores
+Sources/ScreenChecker/        # menu bar app (status item, settings, reports, onboarding)
+Tests/ScreenCheckerCoreTests/
+config/screen-classifier.md   # canonical LLM agent (auto-installed at runtime)
+app/                         # Info.plist + bundle build script
+scripts/setup.sh
+```
+
+### Notes & limitations
+
+- Chrome/Edge/Brave/Chromium/Safari get tab-level enforcement (close tab);
+  Arc and Firefox fall back to app-hide (no usable AppleScript tab API).
+- The ad-hoc signature changes on rebuild, so macOS may re-ask for Screen
+  Recording after a rebuild (sign with a real identity to avoid this).
+- “Launch at login” appears in System Settings → Login Items → allow.
+- Safari closes the *front document* (its AppleScript model of the active
+  tab); verify during your warn-only trial.
