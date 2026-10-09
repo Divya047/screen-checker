@@ -6,6 +6,8 @@ final class StatusItemController: NSObject {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private var stateLine: NSMenuItem!
     private var breakLine: NSMenuItem!
+    private var checkNowLine: NSMenuItem!
+    private var testModeLine: NSMenuItem!
     private var warnLine: NSMenuItem!
     private var enforceLine: NSMenuItem!
     private var loginLine: NSMenuItem!
@@ -30,6 +32,19 @@ final class StatusItemController: NSObject {
         )
         breakLine.target = self
         menu.addItem(breakLine)
+
+        checkNowLine = NSMenuItem(
+            title: "Check screen now (test)", action: #selector(checkNow(_:)), keyEquivalent: "t"
+        )
+        checkNowLine.target = self
+        menu.addItem(checkNowLine)
+
+        testModeLine = NSMenuItem(
+            title: "Monitor continuously (10 min)", action: #selector(toggleTestMode(_:)), keyEquivalent: "T"
+        )
+        testModeLine.target = self
+        menu.addItem(testModeLine)
+        menu.addItem(.separator())
 
         warnLine = NSMenuItem(
             title: "Mode: Warn only", action: #selector(setWarnMode(_:)), keyEquivalent: "1"
@@ -102,6 +117,12 @@ final class StatusItemController: NSObject {
             breakLine.title = "Start \(minutes)-min learning break"
         }
 
+        if controller.monitor.testOverrideUntil != nil {
+            testModeLine.title = "Stop test mode"
+        } else {
+            testModeLine.title = "Monitor continuously (10 min)"
+        }
+
         warnLine.state = config.mode == .warnOnly ? .on : .off
         enforceLine.state = config.mode == .enforce ? .on : .off
         loginLine.state = controller.loginItemEnabled() ? .on : .off
@@ -117,6 +138,22 @@ final class StatusItemController: NSObject {
         } else {
             let minutes = controller.configStore.get().learningBreakMinutes
             monitor.startLearningBreak(minutes: minutes)
+        }
+    }
+
+    @objc private func checkNow(_ sender: Any?) {
+        let monitor = MonitorController.shared.monitor
+        Task.detached(priority: .utility) {
+            await monitor.tick(force: true)
+        }
+    }
+
+    @objc private func toggleTestMode(_ sender: Any?) {
+        let monitor = MonitorController.shared.monitor
+        if monitor.testOverrideUntil != nil {
+            monitor.endTestOverride()
+        } else {
+            monitor.startTestOverride(minutes: 10)
         }
     }
 

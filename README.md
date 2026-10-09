@@ -69,8 +69,27 @@ permissions:
 
 > After granting Screen Recording, restart the app (macOS rule).
 
+If the notification prompt never appeared, open the menu →
+*Permissions & onboarding…* → **Enable…** next to Notifications. If it says
+*denied*, allow it in System Settings → Notifications → ScreenChecker.
+(The app deliberately asks only when you click the button — an accessory
+menu-bar app that asks at launch often has its prompt swallowed.)
+
 It **starts in warn-only mode** — nothing gets closed until you flip
 menu → *Mode: Enforce (close tabs)*. Check **Today’s report** first.
+
+### Trying it immediately (no need to wait for 12:00)
+
+The menu bar has two test commands that bypass the time slots:
+
+- **Check screen now (test)** — samples whatever is frontmost right now,
+  classifies it, logs the event. Safe in warn-only mode.
+- **Monitor continuously (10 min)** — runs the normal sampling loop for
+  10 minutes regardless of slots, then stops by itself.
+
+Flow: open a YouTube Shorts tab → *Check screen now* → **Today’s report**
+should show a 🔴 distraction. Open a tutorial → check again → 🟢 productive.
+Tap **“This was productive”** on any wrong call to grow the allowlist.
 
 ## Configuration
 

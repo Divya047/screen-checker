@@ -23,6 +23,8 @@ final class ReportWindowController: NSWindowController {
         viewController?.refresh()
         showWindow(self)
         window?.center()
+        window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
     }
 }
@@ -51,7 +53,7 @@ private final class ReportViewController: NSViewController {
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.addArrangedSubview(refresh)
 
-        view = NSView()
+        view = NSView(frame: NSRect(x: 0, y: 0, width: 700, height: 520))
         view.addSubview(stack)
         view.addSubview(scrollView)
         NSLayoutConstraint.activate([

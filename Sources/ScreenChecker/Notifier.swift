@@ -31,8 +31,49 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
             options: []
         )
         center.setNotificationCategories([category])
-        Task {
-            _ = try? await center.requestAuthorization(options: [.alert, .sound])
+        // NOTE: no auto-request here. For an accessory (menu-bar) app the
+        // one-time system prompt is easily missed/suppressed if fired at
+        // launch in the background. Authorization is requested from the
+        // onboarding "Enable…" button instead, where the user expects it.
+    }
+
+    // MARK: - Authorization (used by onboarding UI)
+
+    /// Human-readable status for the onboarding row.
+    static func notificationsStatusText() async -> String {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        switch settings.authorizationStatus {
+        case .authorized:
+            return "✅ enabled"
+        case .denied:
+            return "⚠️ denied — allow in System Settings → Notifications → ScreenChecker"
+        case .ephemeral:
+            return "✅ enabled (ephemeral)"
+        case .provisional:
+            return "✅ enabled (provisional)"
+        case .notDetermined:
+            return "⚠️ not enabled"
+        @unknown default:
+            return "⚠️ unknown status"
+        }
+    }
+
+    /// Requests authorization; returns "enabled" or a human-readable reason.
+    /// Must be called from user action (button), not at launch.
+    static func requestNotifications() async -> String {
+        do {
+            let granted = try await UNUserNotificationCenter.current()
+                .requestAuthorization(options: [.alert, .sound])
+            if granted {
+                return "enabled"
+            }
+            let settings = await UNUserNotificationCenter.current().notificationSettings()
+            if settings.authorizationStatus == .denied {
+                return "denied — allow in System Settings → Notifications → ScreenChecker"
+            }
+            return "not granted (status: \(settings.authorizationStatus.rawValue))"
+        } catch {
+            return "request failed: \(error.localizedDescription)"
         }
     }
 

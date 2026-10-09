@@ -24,6 +24,8 @@ final class SettingsWindowController: NSWindowController {
         viewController?.populate()
         showWindow(self)
         window?.center()
+        window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
     }
 }
@@ -85,7 +87,7 @@ private final class SettingsViewController: NSViewController {
         }
         stack.addArrangedSubview(buttons)
 
-        view = NSView()
+        view = NSView(frame: NSRect(x: 0, y: 0, width: 620, height: 520))
         view.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: view.leadingAnchor),

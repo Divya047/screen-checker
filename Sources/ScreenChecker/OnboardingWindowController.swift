@@ -15,6 +15,7 @@ final class OnboardingWindowController: NSWindowController {
             defer: false
         )
         window.title = "ScreenChecker — Permissions & Onboarding"
+        window.level = .floating
         self.init(window: window)
         let viewController = OnboardingViewController()
         self.viewController = viewController
@@ -25,6 +26,8 @@ final class OnboardingWindowController: NSWindowController {
         viewController?.refresh()
         showWindow(self)
         window?.center()
+        window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
     }
 }
@@ -88,7 +91,7 @@ private final class OnboardingViewController: NSViewController {
         done.controlSize = .large
         stack.addArrangedSubview(done)
 
-        view = NSView()
+        view = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 430))
         view.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -147,11 +150,9 @@ private final class OnboardingViewController: NSViewController {
             screenRecordingStatus.stringValue = "⚠️ not granted"
         }
 
-        UNUserNotificationCenter.current().getNotificationSettings { settings in
-            DispatchQueue.main.async {
-                self.notificationsStatus.stringValue =
-                    settings.authorizationStatus == .authorized ? "✅ enabled" : "⚠️ not enabled"
-            }
+        Task {
+            let text = await Notifier.notificationsStatusText()
+            await MainActor.run { self.notificationsStatus.stringValue = text }
         }
 
         automationStatus.stringValue = "prompt on first browser read"
@@ -178,9 +179,11 @@ private final class OnboardingViewController: NSViewController {
 
     @objc private func enableNotifications(_ sender: Any?) {
         Task {
-            _ = try? await UNUserNotificationCenter.current()
-                .requestAuthorization(options: [.alert, .sound])
-            await MainActor.run { self.refresh() }
+            let result = await Notifier.requestNotifications()
+            await MainActor.run {
+                self.notificationsStatus.stringValue =
+                    result == "enabled" ? "✅ enabled" : "⚠️ \(result)"
+            }
         }
     }
 

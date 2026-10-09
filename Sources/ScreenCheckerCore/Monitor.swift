@@ -27,6 +27,7 @@ public final class Monitor: @unchecked Sendable {
 
     private let stateLock = NSLock()
     private var _learningBreakUntil: Date?
+    private var _testOverrideUntil: Date?
     private var _busy = false
     private var verdictCache: [String: (at: Date, classification: Classification)] = [:]
 
@@ -68,11 +69,43 @@ public final class Monitor: @unchecked Sendable {
         publishStatus()
     }
 
+    // MARK: - Test override (try it now, outside slots)
+
+    /// When set, sampling runs regardless of configured slots (still pauses
+    /// for learning breaks, locked screen, or disabled monitoring).
+    public var testOverrideUntil: Date? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        if let until = _testOverrideUntil, Date() < until {
+            return until
+        }
+        return nil
+    }
+
+    public func startTestOverride(minutes: Double = 10) {
+        stateLock.lock()
+        _testOverrideUntil = Date().addingTimeInterval(minutes * 60)
+        stateLock.unlock()
+        publishStatus()
+    }
+
+    public func endTestOverride() {
+        stateLock.lock()
+        _testOverrideUntil = nil
+        stateLock.unlock()
+        publishStatus()
+    }
+
     // MARK: - Activation
 
     public func isMonitoringActive(at date: Date = Date()) -> Bool {
         if let until = learningBreakUntil, date < until { return false }
-        return engine.slotActive(on: date, config: configStore.get())
+        let config = configStore.get()
+        guard config.enabled else { return false }
+        if testOverrideUntil != nil {
+            return engine.isScreenUsable
+        }
+        return engine.slotActive(on: date, config: config)
     }
 
     public func refreshStatus() { publishStatus() }
@@ -93,7 +126,10 @@ public final class Monitor: @unchecked Sendable {
 
     // MARK: - Tick
 
-    public func tick() async {
+    /// - Parameter force: bypass the slot/active gate for a single manual
+    ///   "Check screen now" sample. Learning-break still suppresses enforcement
+    ///   downstream via the Enforcer; the event is always logged.
+    public func tick(force: Bool = false) async {
         stateLock.lock()
         if _busy {
             stateLock.unlock()
@@ -108,7 +144,7 @@ public final class Monitor: @unchecked Sendable {
         }
 
         let config = configStore.get()
-        guard isMonitoringActive() else {
+        guard force || isMonitoringActive() else {
             publishStatus()
             return
         }
@@ -271,6 +307,11 @@ public final class Monitor: @unchecked Sendable {
         } else if let until = learningBreakUntil, Date() < until {
             let minutes = Int(until.timeIntervalSinceNow / 60) + 1
             detail = "Learning break — \(minutes) min left"
+        } else if let until = testOverrideUntil {
+            let minutes = Int(until.timeIntervalSinceNow / 60) + 1
+            detail = engine.isScreenUsable
+                ? "Test mode — \(minutes) min left"
+                : (engine.screenLocked ? "Screen locked" : "Display asleep")
         } else if !engine.isScreenUsable {
             detail = engine.screenLocked ? "Screen locked" : "Display asleep"
         } else if active {
