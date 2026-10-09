@@ -24,12 +24,6 @@ public final class EventStore: @unchecked Sendable {
         f.locale = Locale(identifier: "en_US_POSIX")
         return f
     }()
-    private let stampFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyyMMdd-HHmmss"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        return f
-    }()
 
     public init(directory: URL) {
         self.directory = directory
@@ -73,37 +67,28 @@ public final class EventStore: @unchecked Sendable {
             .last { $0.verdict == "distraction" && $0.ts >= cutoff }
     }
 
-    // MARK: Evidence
+    // MARK: Evidence (disabled — never saved; see Monitor.tick)
 
+    /// Evidence saving is disabled by default (user never reviews it).
+    /// Kept for API compatibility; always returns nil and never writes.
     @discardableResult
     public func saveEvidence(from tempPath: String) -> String? {
+        return nil
+    }
+
+    /// Deletes any leftover evidence files from older versions.
+    public func purgeEvidence() {
         let fm = FileManager.default
-        guard fm.fileExists(atPath: tempPath) else { return nil }
-        let name = stampFormatter.string(from: Date()) + "-" + String(Int.random(in: 1000...9999)) + ".png"
-        let destination = evidenceDirectory.appendingPathComponent(name)
-        do {
-            try? fm.removeItem(at: destination)
-            try fm.copyItem(atPath: tempPath, toPath: destination.path)
-            return name
-        } catch {
-            return nil
+        if let files = try? fm.contentsOfDirectory(at: evidenceDirectory, includingPropertiesForKeys: nil) {
+            for file in files { try? fm.removeItem(at: file) }
         }
     }
 
     /// Drops old screenshots (per config) and very old event logs.
+    /// Evidence is always purged (saving disabled); event logs keep 90 days.
     public func prune(retentionDays: Int) {
+        purgeEvidence()
         let fm = FileManager.default
-        if retentionDays > 0 {
-            let cutoff = Date().addingTimeInterval(-Double(retentionDays) * 86400)
-            if let files = try? fm.contentsOfDirectory(at: evidenceDirectory, includingPropertiesForKeys: [.contentModificationDateKey]) {
-                for file in files {
-                    let date = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                    if let date, date < cutoff {
-                        try? fm.removeItem(at: file)
-                    }
-                }
-            }
-        }
         let eventCutoff = Date().addingTimeInterval(-90 * 86400)
         if let files = try? fm.contentsOfDirectory(at: eventsDirectory, includingPropertiesForKeys: [.contentModificationDateKey]) {
             for file in files {
@@ -150,5 +135,14 @@ public final class EventStore: @unchecked Sendable {
             perAction: perAction,
             events: events
         )
+    }
+
+    /// Last N days of daily summaries (today first). Cheap: one small JSONL
+    /// read per day.
+    public func lastDays(_ n: Int) -> [DailySummary] {
+        (0..<max(1, n)).map { offset in
+            let date = Date().addingTimeInterval(-Double(offset) * 86400)
+            return summary(on: date)
+        }
     }
 }

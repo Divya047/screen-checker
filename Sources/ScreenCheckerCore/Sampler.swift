@@ -1,35 +1,31 @@
 import AppKit
 import Foundation
+import os
 
 /// Grabs everything we know about the current frontmost context:
-/// app + focused window title, the active browser tab URL, and a
-/// screenshot of just that window (written to a temp file).
+/// app + focused window title, the active browser tab URL, and (only when
+/// needed for tier-1) a screenshot of just that window.
 public final class Sampler: @unchecked Sendable {
+    private let log = Logger(subsystem: "dev.screenchecker.app", category: "sampler")
     public init() {}
 
-    /// Returns nil when there is nothing meaningful to inspect
-    /// (no frontmost window, or our own UI is frontmost).
+    /// Full sample (metadata + screenshot). Prefer `sampleMetadata` +
+    /// `attachScreenshot` in the hot path so tier-0 verdicts skip the
+    /// expensive capture entirely.
     public func sample(excluding excludedBundleID: String?) async -> ScreenSnapshot? {
+        guard var snap = await sampleMetadata(excluding: excludedBundleID) else { return nil }
+        snap.screenshotPath = await captureTempScreenshot(windowID: snap.windowID)
+        return snap
+    }
+
+    /// Cheap metadata-only sample: frontmost app/window + tab URL, no capture.
+    public func sampleMetadata(excluding excludedBundleID: String?) async -> ScreenSnapshot? {
         let info = await MainActor.run { self.frontmostWindow() }
         guard let info else { return nil }
         if let excluded = excludedBundleID, let bundleID = info.bundleID, bundleID == excluded {
             return nil
         }
-
         let url = await BrowserContext.activeTabURL(bundleID: info.bundleID, appName: info.name)
-
-        var screenshotPath: String? = nil
-        let stamp = Int(Date().timeIntervalSince1970 * 1000)
-        let destination = FileManager.default.temporaryDirectory
-            .appendingPathComponent("screencheck-\(stamp).png")
-        do {
-            try await ScreenshotCapture.capture(windowID: info.windowID, to: destination)
-            screenshotPath = destination.path
-        } catch {
-            // Keep going without a screenshot; tier 1 still gets app/title/URL.
-            screenshotPath = nil
-        }
-
         return ScreenSnapshot(
             timestamp: Date(),
             appBundleID: info.bundleID,
@@ -38,8 +34,30 @@ public final class Sampler: @unchecked Sendable {
             windowID: info.windowID,
             windowTitle: info.title,
             url: url,
-            screenshotPath: screenshotPath
+            screenshotPath: nil
         )
+    }
+
+    /// Captures the window to a temp PNG; nil on failure (tier 1 still gets
+    /// app/title/URL). Caller owns deletion via Monitor.deleteTemp.
+    public func captureTempScreenshot(windowID: Int) async -> String? {
+        let stamp = Int(Date().timeIntervalSince1970 * 1000)
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("screencheck-\(stamp).png")
+        do {
+            try await ScreenshotCapture.capture(windowID: windowID, to: destination)
+            return destination.path
+        } catch {
+            log.debug("screenshot capture failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    /// Attaches a screenshot to an existing metadata snapshot.
+    public func attachScreenshot(to snapshot: ScreenSnapshot) async -> ScreenSnapshot {
+        var copy = snapshot
+        copy.screenshotPath = await captureTempScreenshot(windowID: snapshot.windowID)
+        return copy
     }
 
     typealias FrontmostInfo = (

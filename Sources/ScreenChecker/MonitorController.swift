@@ -37,6 +37,9 @@ final class MonitorController {
 
     func start() {
         notifier.wire(configStore: configStore, eventStore: eventStore)
+        notifier.reopenHandler = { [weak self] in
+            self?.monitor.reopenLastClosedTab() ?? false
+        }
         monitor.onEvent = { [weak self] event in
             self?.notifier.handle(event: event)
         }
@@ -61,10 +64,13 @@ final class MonitorController {
 
     /// Called once a second on the main run loop. Decides whether it is time
     /// for a sample; the heavy work happens off-main inside Monitor.tick().
+    /// The per-second work here is two cheap in-memory checks; status UI
+    /// refreshes only when the detail text changes (see StatusItemController).
     @objc func fire() {
-        monitor.refreshStatus()
+        let active = monitor.isMonitoringActive()
+        statusItem?.updateIfChanged(monitoring: active)
         let now = Date()
-        guard monitor.isMonitoringActive() else {
+        guard active else {
             lastTickAt = .distantPast
             return
         }

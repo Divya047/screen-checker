@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import ScreenCheckerCore
 import UserNotifications
@@ -7,10 +8,12 @@ import UserNotifications
 /// misjudged learning content.
 final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     static let markProductiveAction = "MARK_PRODUCTIVE"
+    static let reopenAction = "REOPEN_TAB"
     static let categoryID = "DISTRACTION"
 
     private var configStore: ConfigStore?
     private var eventStore: EventStore?
+    var reopenHandler: (() -> Bool)?
 
     func wire(configStore: ConfigStore, eventStore: EventStore) {
         self.configStore = configStore
@@ -19,14 +22,19 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         let center = UNUserNotificationCenter.current()
         center.delegate = self
 
-        let action = UNNotificationAction(
+        let productive = UNNotificationAction(
             identifier: Self.markProductiveAction,
             title: "This was productive",
             options: []
         )
+        let reopen = UNNotificationAction(
+            identifier: Self.reopenAction,
+            title: "Reopen tab",
+            options: []
+        )
         let category = UNNotificationCategory(
             identifier: Self.categoryID,
-            actions: [action],
+            actions: [productive, reopen],
             intentIdentifiers: [],
             options: []
         )
@@ -126,6 +134,15 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     ) {
         if response.actionIdentifier == Self.markProductiveAction {
             DispatchQueue.main.async { self.applyLearningFeedback() }
+        } else if response.actionIdentifier == Self.reopenAction {
+            DispatchQueue.main.async {
+                if self.reopenHandler?() == true { return }
+                // Fallback: reopen the URL carried by the notification.
+                let urlString = response.notification.request.content.userInfo["eventURL"] as? String ?? ""
+                if let url = URL(string: urlString), !urlString.isEmpty {
+                    NSWorkspace.shared.open(url)
+                }
+            }
         }
         completionHandler()
     }

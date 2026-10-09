@@ -8,11 +8,15 @@ final class StatusItemController: NSObject {
     private var breakLine: NSMenuItem!
     private var checkNowLine: NSMenuItem!
     private var testModeLine: NSMenuItem!
+    private var reopenLine: NSMenuItem!
     private var warnLine: NSMenuItem!
     private var enforceLine: NSMenuItem!
     private var loginLine: NSMenuItem!
     private var lastSymbol: String?
     private var lastDetail = "starting…"
+    private var lastMonitoring: Bool?
+    private var lastLoginCheckAt = Date.distantPast
+    private var cachedLogin = false
 
     func start() {
         guard let button = item.button else { return }
@@ -44,6 +48,12 @@ final class StatusItemController: NSObject {
         )
         testModeLine.target = self
         menu.addItem(testModeLine)
+
+        reopenLine = NSMenuItem(
+            title: "Reopen last closed tab", action: #selector(reopenClosed(_:)), keyEquivalent: ""
+        )
+        reopenLine.target = self
+        menu.addItem(reopenLine)
         menu.addItem(.separator())
 
         warnLine = NSMenuItem(
@@ -73,6 +83,12 @@ final class StatusItemController: NSObject {
         )
         loginLine.target = self
         menu.addItem(loginLine)
+
+        let updateLine = NSMenuItem(
+            title: "Check for Updates…", action: #selector(checkForUpdates(_:)), keyEquivalent: ""
+        )
+        updateLine.target = self
+        menu.addItem(updateLine)
         menu.addItem(.separator())
 
         let quit = NSMenuItem(
@@ -85,6 +101,43 @@ final class StatusItemController: NSObject {
     }
 
     // MARK: - State
+
+    /// Cheap per-second path: recomputes the detail string locally and only
+    /// touches the menu when something actually changed. Avoids IPC
+    /// (login-item status) and config reads on every tick.
+    func updateIfChanged(monitoring: Bool) {
+        let controller = MonitorController.shared
+        let config = controller.configStore.get()
+        let detail = Self.detailText(config: config, monitor: controller.monitor, monitoring: monitoring)
+        guard detail != lastDetail || monitoring != lastMonitoring else { return }
+        lastMonitoring = monitoring
+        set(symbol: monitoring ? "eye.fill" : detail.contains("break") ? "cup.and.saucer.fill" : "eye.slash", detail: detail)
+    }
+
+    static func detailText(config: ScreenCheckerCore.AppConfig, monitor: ScreenCheckerCore.Monitor, monitoring: Bool) -> String {
+        if !config.enabled { return "Monitoring disabled" }
+        if let until = monitor.learningBreakUntil, Date() < until {
+            let minutes = Int(until.timeIntervalSinceNow / 60) + 1
+            return "Learning break — \(minutes) min left"
+        }
+        if let until = monitor.testOverrideUntil {
+            let minutes = Int(until.timeIntervalSinceNow / 60) + 1
+            return "Test mode — \(minutes) min left"
+        }
+        if monitoring { return "Monitoring active" }
+        return "Outside monitoring slots"
+    }
+
+    private func set(symbol: String, detail: String) {
+        guard let button = item.button else { return }
+        if symbol != lastSymbol {
+            lastSymbol = symbol
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: detail)
+        }
+        lastDetail = detail
+        button.toolTip = "ScreenChecker — \(detail)"
+        refreshLines()
+    }
 
     func update(_ status: Monitor.Status) {
         guard let button = item.button else { return }
@@ -125,7 +178,13 @@ final class StatusItemController: NSObject {
 
         warnLine.state = config.mode == .warnOnly ? .on : .off
         enforceLine.state = config.mode == .enforce ? .on : .off
-        loginLine.state = controller.loginItemEnabled() ? .on : .off
+        reopenLine.isEnabled = controller.monitor.lastClosedTab != nil
+        // SMAppService.status is IPC — cache for 30s instead of every refresh.
+        if Date().timeIntervalSince(lastLoginCheckAt) > 30 {
+            cachedLogin = controller.loginItemEnabled()
+            lastLoginCheckAt = Date()
+        }
+        loginLine.state = cachedLogin ? .on : .off
     }
 
     // MARK: - Actions
@@ -157,6 +216,12 @@ final class StatusItemController: NSObject {
         }
     }
 
+    @objc private func reopenClosed(_ sender: Any?) {
+        if !MonitorController.shared.monitor.reopenLastClosedTab() {
+            NSSound.beep()
+        }
+    }
+
     @objc private func setWarnMode(_ sender: Any?) {
         MonitorController.shared.configStore.mutate { $0.mode = .warnOnly }
         MonitorController.shared.monitor.refreshStatus()
@@ -171,4 +236,5 @@ final class StatusItemController: NSObject {
     @objc private func openReport(_ sender: Any?) { MonitorController.shared.showReport() }
     @objc private func openOnboarding(_ sender: Any?) { MonitorController.shared.showOnboarding() }
     @objc private func toggleLoginItem(_ sender: Any?) { _ = MonitorController.shared.toggleLoginItem() }
+    @objc private func checkForUpdates(_ sender: Any?) { Updater.shared.checkFromMenu() }
 }

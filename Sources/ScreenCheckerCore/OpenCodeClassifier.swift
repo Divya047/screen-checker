@@ -142,9 +142,12 @@ public final class OpenCodeClassifier: @unchecked Sendable {
         defer { lock.unlock() }
         let fm = FileManager.default
 
-        if let b = cachedBinary, config.opencodeBinaryPath == nil {
+        // Re-validate the cache: the binary may have been deleted/upgraded.
+        if let b = cachedBinary, config.opencodeBinaryPath == nil,
+           fm.isExecutableFile(atPath: b) {
             return b
         }
+        cachedBinary = nil
         if let override = config.opencodeBinaryPath,
            !override.isEmpty,
            fm.isExecutableFile(atPath: override) {
@@ -247,6 +250,7 @@ public final class OpenCodeClassifier: @unchecked Sendable {
     }
 
     /// Waits for process exit, terminating it after `timeout` seconds.
+    /// Escalates SIGTERM -> SIGKILL so a hung child can never leak.
     static func awaitTermination(_ process: Process, timeout: Double) async -> Int32 {
         await withCheckedContinuation { continuation in
             let gate = ContinuationGate(continuation)
@@ -258,7 +262,8 @@ public final class OpenCodeClassifier: @unchecked Sendable {
                     process.terminate()
                     DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
                         if process.isRunning {
-                            process.terminate()
+                            // SIGKILL: terminate() only sends SIGTERM.
+                            kill(process.processIdentifier, SIGKILL)
                         }
                     }
                 }

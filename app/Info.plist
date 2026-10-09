@@ -30,5 +30,7 @@
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>ScreenChecker reads the active browser tab to tell learning from distraction, and closes tabs judged distracting during your monitoring slots.</string>
+	<key>SCUpdateRepo</key>
+	<string>Divya047/screen-checker</string>
 </dict>
 </plist>

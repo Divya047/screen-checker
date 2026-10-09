@@ -1,14 +1,19 @@
+import AppKit
 import Foundation
+import os
 
 /// Orchestrates the monitoring loop:
 ///
 ///   tick (every sampleInterval while active)
-///     -> Sampler: frontmost app + window title + tab URL + window screenshot
-///     -> RuleClassifier (tier 0, instant, offline)
-///     -> if ambiguous: OpenCodeClassifier (tier 1, vision LLM via opencode)
+///     -> Sampler metadata (cheap, no screenshot)
+///     -> idle skip (user away)
 ///     -> verdict cache (same app+URL => reuse for verdictCacheTTL)
-///     -> Enforcer (close tab / hide app, guarded)
-///     -> EventStore (JSONL log + screenshot evidence)
+///     -> RuleClassifier (tier 0, instant, offline)
+///     -> if ambiguous: capture screenshot + OpenCodeClassifier (tier 1)
+///     -> Enforcer (close tab / hide app, guarded, per-target cooldown)
+///     -> EventStore (JSONL log; evidence screenshots disabled)
+///
+/// Evidence is intentionally never saved: temp captures are always deleted.
 public final class Monitor: @unchecked Sendable {
     public struct Status: Sendable {
         public let monitoring: Bool
@@ -24,12 +29,15 @@ public final class Monitor: @unchecked Sendable {
     private let rules = RuleClassifier()
     private let enforcer = Enforcer()
     private let llm: OpenCodeClassifier
+    private let log = Logger(subsystem: "dev.screenchecker.app", category: "monitor")
 
     private let stateLock = NSLock()
     private var _learningBreakUntil: Date?
     private var _testOverrideUntil: Date?
     private var _busy = false
+    private var _droppedTicks = 0
     private var verdictCache: [String: (at: Date, classification: Classification)] = [:]
+    private var _lastClosedTab: (url: String, bundleID: String?, at: Date)?
 
     public var onEvent: ((ScreenEvent) -> Void)?
     public var onStatus: ((Status) -> Void)?
@@ -45,6 +53,30 @@ public final class Monitor: @unchecked Sendable {
         )
         engine.onScreenStateChanged = { [weak self] _ in self?.publishStatus() }
         try? llm.installAgent()
+    }
+
+    public var droppedTicks: Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _droppedTicks
+    }
+
+    /// Most recently closed tab (for Undo / Reopen). Expires after 10 min.
+    public var lastClosedTab: (url: String, bundleID: String?, at: Date)? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let c = _lastClosedTab, Date().timeIntervalSince(c.at) < 600 else { return nil }
+        return c
+    }
+
+    /// Reopens the last closed tab in the default browser. Returns false when
+    /// there is nothing recent to reopen.
+    @discardableResult
+    public func reopenLastClosedTab() -> Bool {
+        guard let closed = lastClosedTab, let url = URL(string: closed.url) else { return false }
+        NSWorkspace.shared.open(url)
+        log.info("reopened closed tab \(closed.url, privacy: .public)")
+        return true
     }
 
     // MARK: - Learning break
@@ -132,7 +164,12 @@ public final class Monitor: @unchecked Sendable {
     public func tick(force: Bool = false) async {
         stateLock.lock()
         if _busy {
+            _droppedTicks += 1
+            let dropped = _droppedTicks
             stateLock.unlock()
+            if dropped == 1 || dropped % 10 == 0 {
+                log.debug("tick dropped (LLM in flight), total dropped=\(dropped)")
+            }
             return
         }
         _busy = true
@@ -149,18 +186,29 @@ public final class Monitor: @unchecked Sendable {
             return
         }
 
-        guard let snapshot = await sampler.sample(excluding: Bundle.main.bundleIdentifier) else {
+        // Idle skip: don't judge a screen nobody is looking at. Cheap
+        // CGEventSource query; force-ticks bypass it for manual testing.
+        if !force, config.idleSkipSeconds > 0 {
+            let idle = IdleDetector.secondsIdle()
+            if idle >= config.idleSkipSeconds {
+                log.debug("tick skipped: idle \(Int(idle))s")
+                publishStatus()
+                return
+            }
+        }
+
+        // 1. Cheap metadata first — no screenshot yet.
+        guard var snapshot = await sampler.sampleMetadata(excluding: Bundle.main.bundleIdentifier) else {
             publishStatus()
             return
         }
 
         let key = cacheKey(for: snapshot)
 
-        // Fresh-enough verdict for the same target: reuse it. Cached
-        // distractions still re-trigger enforcement (which has its own
-        // cooldown), so the nagging stops only when the tab actually closes.
+        // Fresh-enough verdict for the same target: reuse it without any
+        // capture or LLM call. Cached distractions still re-trigger
+        // enforcement (per-target cooldown), so nagging stops when the tab closes.
         if let cached = cachedVerdict(key: key, ttl: config.verdictCacheTTL) {
-            deleteTemp(snapshot.screenshotPath)
             if case .distraction = cached.verdict {
                 let action = await enforcer.enforce(
                     snapshot: snapshot,
@@ -170,6 +218,7 @@ public final class Monitor: @unchecked Sendable {
                 )
                 var event = Self.event(for: snapshot, classification: cached)
                 event.action = action.rawValue
+                rememberClosedTab(snapshot: snapshot, action: action)
                 eventStore.append(event)
                 onEvent?(event)
             }
@@ -177,9 +226,24 @@ public final class Monitor: @unchecked Sendable {
             return
         }
 
+        // 2. Tier-0 rules (instant, offline).
         var classification = rules.classify(snapshot, config: config)
+
+        // 3. Tier-1 only for ambiguous: capture screenshot lazily, then LLM.
         if case .ambiguous = classification.verdict, config.llmForAmbiguous {
-            classification = await llm.classify(snapshot)
+            snapshot = await sampler.attachScreenshot(to: snapshot)
+            if snapshot.screenshotPath != nil {
+                let started = Date()
+                classification = await llm.classify(snapshot)
+                log.debug("llm verdict \(String(describing: classification.verdict), privacy: .public) in \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
+            } else {
+                // No capture (e.g. permission missing): stay ambiguous,
+                // never enforce.
+                classification = Classification(
+                    verdict: .ambiguous(reason: "no screenshot available"),
+                    tier: 1, model: config.opencodeModel, error: "screenshot unavailable"
+                )
+            }
         }
         storeVerdict(key: key, classification: classification)
 
@@ -195,17 +259,21 @@ public final class Monitor: @unchecked Sendable {
 
         var event = Self.event(for: snapshot, classification: classification)
         event.action = action.rawValue
-        // Keep evidence for anything worth reviewing later: LLM judgments
-        // (productive or not) and every distraction verdict.
-        if (classification.tier == 1 || action != .sampled) && config.keepScreenshots,
-           let path = snapshot.screenshotPath {
-            event.screenshot = eventStore.saveEvidence(from: path)
-        }
-        deleteTemp(snapshot.screenshotPath, saved: event.screenshot != nil)
+        rememberClosedTab(snapshot: snapshot, action: action)
+        // Evidence disabled: never persist screenshots; always clean temp.
+        event.screenshot = nil
+        deleteTemp(snapshot.screenshotPath)
 
         eventStore.append(event)
         onEvent?(event)
         publishStatus()
+    }
+
+    private func rememberClosedTab(snapshot: ScreenSnapshot, action: EnforcementAction) {
+        guard action == .closedTab, let url = snapshot.url, !url.isEmpty else { return }
+        stateLock.lock()
+        _lastClosedTab = (url, snapshot.appBundleID, Date())
+        stateLock.unlock()
     }
 
     // MARK: - Event building
@@ -247,29 +315,36 @@ public final class Monitor: @unchecked Sendable {
     // MARK: - Verdict cache
 
     func cacheKey(for snapshot: ScreenSnapshot) -> String {
-        let urlKey = snapshot.url.map { Self.normalizeURL($0) } ?? ""
-        let titleKey = String(snapshot.windowTitle.prefix(80))
-        return (snapshot.appBundleID ?? snapshot.appName) + "|"
-            + (urlKey.isEmpty ? titleKey : urlKey)
+        let app = (snapshot.appBundleID ?? snapshot.appName).lowercased()
+        if let url = snapshot.url, !url.isEmpty {
+            return app + "|" + Self.normalizeURL(url)
+        }
+        return app + "|t:" + snapshot.windowTitle.lowercased().prefix(80)
     }
 
+    /// Normalizes a URL to host+path for cache keys: lowercased host,
+    /// tracking query params stripped, fragment dropped. YouTube watch URLs
+    /// keep only the video ID so verdicts stay per-video.
     static func normalizeURL(_ raw: String) -> String {
-        guard let url = URL(string: raw), let host = url.host else {
-            return raw.lowercased()
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed), let host = url.host else {
+            return trimmed.lowercased()
         }
         let lowered = host.lowercased()
-        // YouTube watch URLs collapse to the same path; keep the video ID so
-        // verdicts stay per-video instead of per-site.
         if lowered.contains("youtube.com"), url.path.lowercased().contains("/watch") {
-            let videoID = URLComponents(string: raw)?
+            let videoID = URLComponents(string: trimmed)?
                 .queryItems?
                 .first { $0.name == "v" }?
-                .value
-            if let videoID {
-                return lowered + "/watch?v=" + videoID.lowercased()
+                .value?
+                .lowercased()
+            if let videoID, !videoID.isEmpty {
+                return lowered + "/watch?v=" + videoID
             }
+            return lowered + "/watch"
         }
         var path = url.path
+        // Strip trailing slash (except root) so /a and /a/ share a verdict.
+        if path.count > 1, path.hasSuffix("/") { path.removeLast() }
         if path.count > 60 { path = String(path.prefix(60)) }
         return lowered + path
     }
@@ -318,6 +393,10 @@ public final class Monitor: @unchecked Sendable {
             detail = "Monitoring active"
         } else {
             detail = "Outside monitoring slots"
+        }
+        let problems = config.validationErrors()
+        if !problems.isEmpty, active {
+            detail += " (\(problems.count) config issue\(problems.count == 1 ? "" : "s"))"
         }
         onStatus?(Status(monitoring: active, detail: detail, breakUntil: learningBreakUntil))
     }

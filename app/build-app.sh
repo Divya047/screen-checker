@@ -13,9 +13,26 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/ScreenChecker"
 cp app/Info.plist "$APP/Contents/Info.plist"
 
-# Ad-hoc signature: TCC (permissions) binds to the bundle id + signature.
-# Rebuilds re-sign, so macOS may ask again for Screen Recording after updates.
-codesign --force --sign - --timestamp=none "$APP"
+# Stable signature: TCC (Screen Recording / Automation) binds to bundle id + Team ID.
+# Ad-hoc ("-") has no Team ID, so every rebuild resets permissions.
+# A real identity (even free "Apple Development") keeps the same Team ID,
+# so rebuilds preserve granted permissions.
+# Override with: CODESIGN_IDENTITY="Apple Development: ..." ./app/build-app.sh
+if [ -z "${CODESIGN_IDENTITY:-}" ]; then
+  # Auto-pick the first valid development/distribution identity, if any.
+  CODESIGN_IDENTITY="$(security find-identity -v -p codesigning | grep -oE '"Apple Development[^"]*"|"Apple Distribution[^"]*"|"Developer ID[^"]*"' | head -1 | tr -d '"')"
+  if [ -z "$CODESIGN_IDENTITY" ]; then
+    CODESIGN_IDENTITY="-"
+  fi
+fi
+
+if [ "$CODESIGN_IDENTITY" = "-" ]; then
+  echo "Signing ad-hoc (permissions will reset on every rebuild)."
+  codesign --force --sign - --timestamp=none "$APP"
+else
+  echo "Signing with identity: $CODESIGN_IDENTITY"
+  codesign --force --sign "$CODESIGN_IDENTITY" "$APP"
+fi
 
 echo "✅ Built $APP"
 echo "First run:  open $APP"

@@ -54,9 +54,9 @@ public struct AppConfig: Codable, Sendable {
     public var enabled: Bool = true
     public var mode: EnforcementMode = .warnOnly
 
-    /// When monitoring is armed (local time). Default: the lunch danger zone.
+    /// When monitoring is armed (local time). Default: noon to 9pm.
     public var slots: [TimeSlot] = [
-        TimeSlot(start: "12:00", end: "13:00", label: "Lunch danger zone"),
+        TimeSlot(start: "12:00", end: "21:00", label: "Daytime"),
     ]
     public var skipWeekends: Bool = true
 
@@ -73,9 +73,21 @@ public struct AppConfig: Codable, Sendable {
 
     /// Send ambiguous samples to the LLM classifier.
     public var llmForAmbiguous: Bool = true
-    public var keepScreenshots: Bool = true
-    public var screenshotRetentionDays: Int = 7
+    /// Evidence screenshots are disabled: never saved (user does not review
+    /// them). Kept for config compatibility; the engine ignores it and always
+    /// deletes temp captures. See Monitor.tick.
+    public var keepScreenshots: Bool = false
+    public var screenshotRetentionDays: Int = 0
 
+    /// Skip a tick when the user has been idle this long (seconds). 0 disables.
+    /// Cheap idle check via CGEventSource; prevents false positives when away.
+    public var idleSkipSeconds: Double = 120
+
+    /// NOTE (verified 2026-10-09): OpenCode `*-free` models
+    /// (e.g. `opencode/muse-spark-1.3-contributor-free`) return 403
+    /// "FreeTierError: OpenCode's free tier can only be used from within
+    /// OpenCode" when invoked via `opencode run` (background CLI), so they
+    /// cannot power this daemon. Keep a Go/paid vision model here.
     public var opencodeModel: String = "opencode-go/mimo-v2.6-pro"
     public var opencodeTimeout: Double = 45
     /// Optional explicit path to the opencode binary.
@@ -181,4 +193,36 @@ public struct AppConfig: Codable, Sendable {
     ]
 
     public init() {}
+
+    /// Human-readable config problems (empty = valid). Used by Settings UI
+    /// and onboarding; invalid slots simply never match (fail-closed timing).
+    public func validationErrors() -> [String] {
+        var errors: [String] = []
+        if sampleInterval < 5 { errors.append("sampleInterval must be ≥ 5 seconds.") }
+        if slots.isEmpty { errors.append("at least one monitoring slot is required.") }
+        for s in slots {
+            guard TimeSlot.minutes(from: s.start) != nil, TimeSlot.minutes(from: s.end) != nil else {
+                errors.append("slot '\(s.start)-\(s.end)' is not valid HH:mm.")
+                continue
+            }
+            if s.start == s.end { errors.append("slot '\(s.start)-\(s.end)' is empty (start == end).") }
+        }
+        if confidenceThreshold <= 0 || confidenceThreshold > 1 {
+            errors.append("confidenceThreshold must be in (0, 1].")
+        }
+        if enforcementCooldown < 5 { errors.append("enforcementCooldown must be ≥ 5 seconds.") }
+        if verdictCacheTTL < 60 { errors.append("verdictCacheTTL must be ≥ 60 seconds.") }
+        if learningBreakMinutes < 1 { errors.append("learningBreakMinutes must be ≥ 1.") }
+        if opencodeTimeout < 10 { errors.append("opencodeTimeout must be ≥ 10 seconds.") }
+        if opencodeModel.trimmingCharacters(in: .whitespaces).isEmpty {
+            errors.append("opencodeModel must not be empty.")
+        }
+        if idleSkipSeconds < 0 { errors.append("idleSkipSeconds must be ≥ 0 (0 disables idle skip).") }
+        return errors
+    }
+
+    /// True for OpenCode free-tier models (`*-free`), which fail via CLI.
+    public static func isFreeTierModel(_ model: String) -> Bool {
+        model.lowercased().hasSuffix("-free")
+    }
 }

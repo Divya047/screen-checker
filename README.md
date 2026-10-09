@@ -11,8 +11,8 @@ instant local rules first, and a vision LLM (via the local `opencode` CLI and
 
 ## What it does
 
-Every sample tick (default 30s), while the screen is unlocked and the current
-time is inside a monitoring slot (default **12:00–13:00** weekdays, editable):
+Every sample tick (default 30s), while the screen is unlocked and awake and the current
+time is inside a monitoring slot (default **12:00–21:00** daily, editable):
 
 1. **Sample** — frontmost app, focused window title, active browser tab URL,
    and a screenshot of just that window.
@@ -36,11 +36,21 @@ time is inside a monitoring slot (default **12:00–13:00** weekdays, editable):
    - browsers → **close the active tab** (AppleScript)
    - other apps → **hide** (never force-quit)
    - guarded by: mode must be `enforce`, LLM confidence ≥ threshold,
-     a global action cooldown (default 120s), and no active learning break.
-   - you get a notification with **“This was productive”**, which adds the
-     URL/channel to the learning allowlist for the future.
-5. **Log** — daily JSONL events + screenshot evidence (auto-pruned),
-   viewable as “Today’s report”.
+     a **per-target cooldown** (same app+URL, default 120s) plus a short
+     global safety cooldown, protected-title double-guard, and no active learning break.
+   - you get a notification with **“This was productive”** (grows the
+     allowlist) and **“Reopen tab”** (undoes a closed tab; also in the
+     menu bar → *Reopen last closed tab*).
+5. **Log** — daily JSONL events (auto-pruned after 90 days),
+   viewable as “Report” (today + 7-day trend, config-issue warnings,
+   one-click *was productive* / *reopen* buttons). **No screenshots are
+   saved** — temp captures are always deleted.
+
+Monitoring pauses while the screen is locked/asleep, **while idle**
+(`idleSkipSeconds`, default 120s), outside slots, or during
+a **learning break** (menu → “Start 30-min learning break”). Screenshots are
+captured **lazily** — only when tier-0 returns ambiguous and the LLM is
+enabled — so productive screens never pay the capture cost.
 
 Monitoring pauses while the screen is locked/asleep, outside slots, or during
 a **learning break** (menu → “Start 30-min learning break”).
@@ -105,17 +115,18 @@ Everything lives in
 ```jsonc
 {
   "mode": "warnOnly",                  // warnOnly | enforce
-  "slots": [ { "start": "12:00", "end": "13:00", "label": "Lunch danger zone" } ],
+  "slots": [ { "start": "12:00", "end": "21:00", "label": "Daytime" } ],
   "skipWeekends": true,
   "sampleInterval": 30,
   "confidenceThreshold": 0.8,          // minimum LLM confidence to enforce
-  "enforcementCooldown": 120,          // seconds between actions
+  "enforcementCooldown": 120,          // per-target seconds between actions
   "verdictCacheTTL": 600,             // same app+URL -> reuse verdict
   "learningBreakMinutes": 30,
+  "idleSkipSeconds": 120,             // skip ticks when idle (0 disables)
   "llmForAmbiguous": true,
-  "keepScreenshots": true,
-  "screenshotRetentionDays": 7,
-  "opencodeModel": "opencode-go/mimo-v2.6-pro",
+  "keepScreenshots": false,           // always false: evidence disabled
+  "screenshotRetentionDays": 0,
+  "opencodeModel": "opencode-go/mimo-v2.6-pro",  // *-free models fail via CLI (403)
   "opencodeTimeout": 45,
   "learningChannelPatterns": [ "youtube.com/@freecodecamp", ... ],
   "learningTitleKeywords": [ "tutorial", "lecture", ... ],
@@ -128,8 +139,14 @@ Everything lives in
 - Learning rules **always win** over distraction patterns.
 - Tapping **“This was productive”** on a notification appends to
   `learningURLPatterns` (YouTube watch URLs pin to the specific video).
-- Files: `events/*.jsonl` (90-day log), `evidence/*.png` (retention days),
+- Files: `events/*.jsonl` (90-day log),
   `.opencode/agents/screen-classifier.md` (auto-installed classifier agent).
+  `evidence/` is purged on launch and never written.
+- Model note (verified 2026-10-09): `*-free` models such as
+  `opencode/muse-spark-1.3-contributor-free` return **403 FreeTierError**
+  (“free tier can only be used from within OpenCode”) via `opencode run`,
+  so the daemon keeps `opencode-go/mimo-v2.6-pro`. Settings warns if you
+  pick a `-free` model.
 
 ## Privacy & safety design
 
@@ -147,7 +164,7 @@ Everything lives in
 ## Development
 
 ```bash
-swift build && swift test    # 34 unit tests (slots, rules, LLM output parsing)
+swift build && swift test    # 43 unit tests (slots, rules, LLM output parsing, improvements)
 ./app/build-app.sh           # release bundle + ad-hoc codesign
 ```
 

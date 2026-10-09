@@ -160,9 +160,18 @@ private final class OnboardingViewController: NSViewController {
         let monitor = MonitorController.shared.monitor
         if let binary = monitor.classifierBinaryStatus() {
             let suffix = monitor.agentInstalled() ? " · agent installed" : " · agent missing"
-            opencodeStatus.stringValue = "✅ \(binary)\(suffix)"
+            var text = "✅ \(binary)\(suffix)"
+            let model = MonitorController.shared.configStore.get().opencodeModel
+            if AppConfig.isFreeTierModel(model) {
+                text = "⚠️ \(model) is free-tier and fails via CLI (403) — switch model in Settings"
+            }
+            opencodeStatus.stringValue = text
         } else {
             opencodeStatus.stringValue = "⚠️ opencode not found on PATH"
+        }
+        let problems = MonitorController.shared.configStore.get().validationErrors()
+        if !problems.isEmpty {
+            opencodeStatus.stringValue += " · config: \(problems[0])"
         }
     }
 
