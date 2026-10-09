@@ -63,11 +63,16 @@ permissions:
 
 | Permission | Why |
 |---|---|
-| **Screen Recording** | window titles + frontmost-window screenshots |
+| **Screen Recording** | window titles + frontmost-window screenshots — click **Grant…**, toggle ScreenChecker **ON** in Settings, restart the app |
 | **Notifications** | distraction alerts + “This was productive” action |
-| **Automation** (per browser) | reading/closing the active tab — a prompt appears the first time each browser is touched |
+| **Automation** (per browser) | reading/closing the active tab — click **Trigger prompt…** with your browser open, then approve the system dialog (once per browser) |
 
 > After granting Screen Recording, restart the app (macOS rule).
+> macOS only prompts once: if you dismissed a prompt earlier, the button
+> takes you straight to Settings for the manual toggle — that's the fix,
+> not a bug.
+> Note: rebuilds re-sign the app ad-hoc, which resets these permissions —
+> grant them on the build you intend to keep running.
 
 If the notification prompt never appeared, open the menu →
 *Permissions & onboarding…* → **Enable…** next to Notifications. If it says

@@ -56,7 +56,7 @@ private final class OnboardingViewController: NSViewController {
 
         stack.addArrangedSubview(block(
             title: "1 · Screen Recording",
-            subtitle: "Reads window titles and captures the frontmost window screenshot.",
+            subtitle: "Reads window titles and captures the frontmost window. Click Grant, toggle ScreenChecker ON in Settings, then restart the app (macOS rule).",
             status: screenRecordingStatus,
             buttonTitle: "Grant…",
             buttonAction: #selector(grantScreenRecording(_:))
@@ -72,10 +72,10 @@ private final class OnboardingViewController: NSViewController {
 
         stack.addArrangedSubview(block(
             title: "3 · Automation (browsers)",
-            subtitle: "A one-time prompt appears the first time each browser is read or closed. Approve it.",
+            subtitle: "Reads/closes the active tab. Click below with your browser open, then approve the system prompt — once per browser. (Background reads can't trigger the prompt, which is why it never appeared.)",
             status: automationStatus,
-            buttonTitle: "Open Settings…",
-            buttonAction: #selector(openAutomationSettings(_:))
+            buttonTitle: "Trigger prompt…",
+            buttonAction: #selector(triggerAutomationPrompt(_:))
         ))
 
         stack.addArrangedSubview(block(
@@ -145,7 +145,7 @@ private final class OnboardingViewController: NSViewController {
 
     func refresh() {
         if ScreenshotCapture.hasPermission() {
-            screenRecordingStatus.stringValue = "✅ granted"
+            screenRecordingStatus.stringValue = "✅ granted (restart the app if you just enabled it)"
         } else {
             screenRecordingStatus.stringValue = "⚠️ not granted"
         }
@@ -169,11 +169,16 @@ private final class OnboardingViewController: NSViewController {
     // MARK: - Actions
 
     @objc private func grantScreenRecording(_ sender: Any?) {
-        if ScreenshotCapture.hasPermission() {
-            openPane("Privacy_ScreenCapture")
-        } else {
-            _ = ScreenshotCapture.requestPermission()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.refresh() }
+        // requestPermission() only prompts the very first time; afterwards it
+        // is a silent no-op (per SDK docs), so ALWAYS open Settings too —
+        // the manual toggle is where granting actually happens.
+        _ = ScreenshotCapture.requestPermission()
+        openPane("Privacy_ScreenCapture")
+        screenRecordingStatus.stringValue = "… toggle ScreenChecker ON in Settings, then restart …"
+        for delay in [1.5, 5.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.refresh()
+            }
         }
     }
 
@@ -187,8 +192,17 @@ private final class OnboardingViewController: NSViewController {
         }
     }
 
-    @objc private func openAutomationSettings(_ sender: Any?) {
-        openPane("Privacy_Automation")
+    @objc private func triggerAutomationPrompt(_ sender: Any?) {
+        automationStatus.stringValue = "… asking browser (approve the system prompt) …"
+        Task { @MainActor in
+            let result = await BrowserContext.warmUp()
+            self.automationStatus.stringValue = result.granted
+                ? result.message
+                : "⚠️ \(result.message)"
+            if !result.granted {
+                self.openPane("Privacy_Automation")
+            }
+        }
     }
 
     @objc private func reinstallAgent(_ sender: Any?) {
